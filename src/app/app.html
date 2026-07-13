@@ -1,0 +1,308 @@
+<div class="app-wrapper">
+
+  <!-- ═══ HEADER ══════════════════════════════════════════════════════════════ -->
+  <header class="app-header">
+    <div class="header-left">
+      <span class="header-icon">⚡</span>
+      <span class="header-title">Sort Pairs Manager</span>
+      <span class="header-badge">AG Grid + AI Control</span>
+    </div>
+  </header>
+
+  <!-- ═══ TOOLBAR ═════════════════════════════════════════════════════════════ -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <button class="btn btn-icon" (click)="importCsv()" title="Import CSV Template">
+        <span>⬆</span> Import CSV Template
+      </button>
+      <button class="btn btn-icon" (click)="createSortPair()" title="Create Sort Pairs">
+        <span>＋</span> Create Sort Pairs
+      </button>
+    </div>
+    <div class="toolbar-right">
+      <button class="btn btn-icon btn-outline" (click)="exportCsv()" title="Export Details">
+        <span>⬇</span> Export Details
+      </button>
+      <button class="btn btn-icon btn-outline" (click)="refresh()" title="Refresh">
+        <span>↺</span> Refresh
+      </button>
+      <button class="btn btn-icon btn-outline" (click)="clearFilters()" title="Clear Filters">
+        <span>✕</span> Clear Filters
+      </button>
+    </div>
+  </div>
+
+  <!-- ═══ MAIN CONTENT ════════════════════════════════════════════════════════ -->
+  <div class="main-content">
+
+    <!-- ── Grid panel ─────────────────────────────────────────────────────── -->
+    <div class="grid-panel">
+
+      <!-- Status bar -->
+      <div class="grid-statusbar">
+        <span class="status-item"><b>{{ totalRows }}</b> rows displayed</span>
+        <span class="status-separator">|</span>
+        <span class="status-item" [class.has-selection]="selectedRows > 0">
+          <b>{{ selectedRows }}</b> selected
+        </span>
+        <span class="status-separator">|</span>
+        <span class="status-item">Page <b>{{ currentPage }}</b> of <b>{{ totalPages }}</b></span>
+      </div>
+
+      <!-- AG Grid -->
+      <ag-grid-angular
+        class="ag-theme-custom"
+        [columnDefs]="columnDefs"
+        [defaultColDef]="defaultColDef"
+        [rowData]="rowData"
+        [pagination]="pagination"
+        [paginationPageSize]="paginationPageSize"
+        [paginationPageSizeSelector]="paginationPageSizeSelector"
+        [rowSelection]="rowSelection"
+        [animateRows]="true"
+        [enableCellTextSelection]="true"
+        [suppressRowClickSelection]="true"
+        [getContextMenuItems]="getContextMenuItems.bind(this)"
+        [tooltipShowDelay]="500"
+        (gridReady)="onGridReady($event)"
+        (paginationChanged)="onPaginationChanged($event)"
+        (selectionChanged)="onSelectionChanged()"
+        (filterChanged)="onFilterChanged()"
+        style="width:100%; height:100%;"
+      />
+    </div>
+
+    <!-- ── AI Command panel ───────────────────────────────────────────────── -->
+    <div class="ai-panel">
+      <div class="ai-panel-header">
+        <span class="ai-icon">🤖</span>
+        <span class="ai-title">AI Grid Control</span>
+        <span class="llm-status-dot" [class]="'llm-dot-' + llmStatus" [title]="llmStatusMsg || 'LLM: ' + llmStatus"></span>
+        <span class="ai-subtitle">{{ llmStatus === 'connected' ? '🟢 LLM Active' : 'Rule-based NLU' }}</span>
+        <button class="btn-settings" (click)="openSettings()" title="AI / LLM Settings">⚙</button>
+        <button class="btn-clear-history" (click)="clearAiHistory()" title="Clear history">✕</button>
+      </div>
+
+      <!-- Live parse indicator -->
+      @if (lastParseInfo && !isProcessing) {
+        <div class="parse-badge-bar">
+          <span class="parse-intent-badge">{{ lastParseInfo.intentLabel }}</span>
+          <span class="parse-conf" [class]="confidenceClass(lastParseInfo.confidence)">
+            {{ confidencePct(lastParseInfo.confidence) }} confidence
+          </span>
+        </div>
+      }
+      @if (isProcessing) {
+        <div class="parse-badge-bar">
+          <span class="ai-thinking">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            Analyzing command…
+          </span>
+        </div>
+      }
+
+      <!-- Input area -->
+      <div class="ai-input-wrapper">
+        <textarea
+          class="ai-textarea"
+          [(ngModel)]="aiInput"
+          (keydown)="onAiKeydown($event)"
+          (focus)="showHints = true"
+          placeholder="Try: 'show rows where number > 5 and user contains Vignesh'&#10;Tip: chain commands with ';'"
+          rows="3"
+        ></textarea>
+        <div class="ai-input-actions">
+          <span class="ai-hint-label">Enter or click Run ↓</span>
+          <button
+            class="ai-submit-btn"
+            [disabled]="!aiInput.trim() || isProcessing"
+            (click)="processAiCommand()"
+          >{{ isProcessing ? '…' : '▶ Run' }}</button>
+        </div>
+      </div>
+
+      <!-- Hint chips -->
+      @if (showHints) {
+        <div class="ai-hints">
+          <div class="ai-hints-title">
+            Quick Commands &amp; Examples
+            <button class="btn-close-hints" (click)="showHints=false">✕</button>
+          </div>
+          <div class="hints-grid">
+            @for (hint of hints; track hint) {
+              <button class="hint-chip" (click)="applyHint(hint)">{{ hint }}</button>
+            }
+          </div>
+        </div>
+      }
+
+      <!-- Message log -->
+      <div class="ai-log">
+        <div class="ai-log-header">
+          Command History
+          @if (aiMessages.length > 0) {
+            <span class="log-count">{{ aiMessages.length }}</span>
+          }
+        </div>
+        @if (aiMessages.length === 0) {
+          <div class="ai-log-empty">
+            No commands yet.<br>
+            Try: <em>"show rows where number > 5"</em><br>
+            or: <em>"distribution by user"</em>
+          </div>
+        }
+        @for (msg of aiMessages; track msg.time) {
+          <div class="ai-log-item" [class.success]="msg.success" [class.error]="!msg.success">
+            <div class="ai-log-top">
+              <span class="ai-log-time">{{ msg.time }}</span>
+              @if (msg.parseInfo) {
+                <span class="pi-intent-chip">{{ msg.parseInfo.intentLabel }}</span>
+                <span class="pi-conf-dot" [class]="confidenceClass(msg.parseInfo.confidence)" [title]="confidencePct(msg.parseInfo.confidence) + ' confidence'"></span>
+                <button class="pi-expand-btn" (click)="toggleExpand(msg)">{{ msg.expanded ? '▲' : '▼' }}</button>
+              }
+            </div>
+            <pre class="ai-log-text" [class.ai-analysis-text]="msg.parseInfo?.intent === 'analysis'">{{ msg.text }}</pre>
+
+            <!-- Parse breakdown (expandable) -->
+            @if (msg.expanded && msg.parseInfo) {
+              <div class="parse-breakdown">
+                <div class="pb-row">
+                  <span class="pb-key">Intent</span>
+                  <span class="pb-val">{{ msg.parseInfo.intentLabel }}</span>
+                </div>
+                <div class="pb-row">
+                  <span class="pb-key">Confidence</span>
+                  <div class="pb-conf-bar">
+                    <div class="pb-conf-fill" [class]="confidenceClass(msg.parseInfo.confidence)" [style.width]="confidencePct(msg.parseInfo.confidence)"></div>
+                    <span class="pb-conf-label">{{ confidencePct(msg.parseInfo.confidence) }}</span>
+                  </div>
+                </div>
+                <div class="pb-row">
+                  <span class="pb-key">Understood as</span>
+                  <span class="pb-val italic">{{ msg.parseInfo.interpretation }}</span>
+                </div>
+                @if (msg.parseInfo.entities.length > 0) {
+                  <div class="pb-entities">
+                    @for (e of msg.parseInfo.entities; track e.label) {
+                      <span class="pb-entity" [class]="'ent-' + e.type">
+                        <span class="ent-label">{{ e.label }}</span>
+                        <span class="ent-value">{{ e.value }}</span>
+                      </span>
+                    }
+                  </div>
+                }
+              </div>
+            }
+
+            <!-- Stat result bar chart -->
+            @if (msg.statResult?.breakdown) {
+              <div class="stat-chart">
+                @for (b of msg.statResult!.breakdown!; track b.label) {
+                  <div class="stat-bar-row">
+                    <span class="stat-bar-label" [title]="b.label">{{ b.label.split(' - ')[1] || b.label }}</span>
+                    <div class="stat-bar-track">
+                      <div class="stat-bar-fill" [style.width]="b.pct + '%'"></div>
+                    </div>
+                    <span class="stat-bar-val">{{ b.count }} ({{ b.pct }}%)</span>
+                  </div>
+                }
+              </div>
+            }
+          </div>
+        }
+      </div>
+
+      <!-- Cheatsheet -->
+      <div class="ai-cheatsheet">
+        <div class="cheatsheet-title">NLP Capabilities</div>
+        <div class="cheatsheet-grid">
+          <div class="cheatsheet-item"><b>🔍 Filter:</b> natural language conditions</div>
+          <div class="cheatsheet-item"><b>↕ Sort:</b> sort by [col] [asc|desc]</div>
+          <div class="cheatsheet-item"><b>📊 Stats:</b> count, avg, sum, max, distribution</div>
+          <div class="cheatsheet-item"><b>📋 Rows:</b> show last/first N rows</div>
+          <div class="cheatsheet-item"><b>📦 Export:</b> export csv / send to mail</div>
+          <div class="cheatsheet-item"><b>⛓ Chain:</b> cmd1; cmd2; cmd3</div>
+          <div class="cheatsheet-item"><b>📄 Pages:</b> page N / show all data without pagination</div>
+          <div class="cheatsheet-item"><b>👁 Cols:</b> hide col X, Y / hide except Sort Pairs</div>
+          <div class="cheatsheet-item"><b>🔄 Reset:</b> clear filters / reset</div>
+          <div class="cheatsheet-item"><b>⚙ LLM:</b> click ⚙ to add AI model key</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end main-content -->
+
+  <!-- ═══ LLM SETTINGS MODAL ═══════════════════════════════════════════════════════════ -->
+  @if (showSettings) {
+    <div class="settings-overlay" (click)="closeSettings()"></div>
+    <div class="settings-modal">
+      <div class="settings-header">
+        <span>⚙ AI / LLM Settings</span>
+        <button class="btn-close-modal" (click)="closeSettings()">✕</button>
+      </div>
+      <div class="settings-body">
+        <p class="settings-intro">
+          Connect a real AI model (LLM) for true free-form natural language understanding.
+          The rule-based system still works without a key.
+        </p>
+
+        <!-- Provider -->
+        <div class="settings-row">
+          <label class="settings-label">Provider</label>
+          <select class="settings-input" [(ngModel)]="llmConfig.provider" (ngModelChange)="onProviderChange()">
+            @for (p of llmProviders; track p) {
+              <option [value]="p">{{ p === 'groq' ? 'Groq (free)' : p === 'openai' ? 'OpenAI' : p === 'ollama' ? 'Ollama (local)' : 'Custom' }}</option>
+            }
+          </select>
+          <small class="settings-hint">{{ llmPresets[llmConfig.provider]?.note }}</small>
+        </div>
+
+        <!-- API Key -->
+        <div class="settings-row">
+          <label class="settings-label">API Key</label>
+          <input class="settings-input" type="password" [(ngModel)]="llmConfig.apiKey"
+            placeholder="{{ llmConfig.provider === 'ollama' ? 'Type: ollama' : 'Enter API key...' }}" />
+          @if (llmConfig.provider === 'groq') {
+            <small class="settings-hint">Free — sign up at <strong>console.groq.com</strong>, no credit card needed</small>
+          }
+          @if (llmConfig.provider === 'ollama') {
+            <small class="settings-hint">Just type "ollama" — no real key needed for local models</small>
+          }
+        </div>
+
+        <!-- Model -->
+        <div class="settings-row">
+          <label class="settings-label">Model</label>
+          <input class="settings-input" type="text" [(ngModel)]="llmConfig.model"
+            placeholder="e.g. llama-3.1-8b-instant" />
+        </div>
+
+        <!-- Base URL -->
+        <div class="settings-row">
+          <label class="settings-label">Base URL</label>
+          <input class="settings-input" type="text" [(ngModel)]="llmConfig.baseUrl"
+            placeholder="https://api.groq.com/openai/v1" />
+          <small class="settings-hint">OpenAI-compatible API endpoint (include /v1)</small>
+        </div>
+
+        <!-- Status -->
+        @if (llmStatusMsg) {
+          <div class="settings-status" [class.settings-ok]="llmStatus === 'connected'" [class.settings-err]="llmStatus === 'error'">
+            {{ llmStatusMsg }}
+          </div>
+        }
+      </div>
+      <div class="settings-footer">
+        <button class="btn btn-outline" (click)="clearLlmConfig()">Disconnect</button>
+        <button class="btn btn-outline" [disabled]="llmStatus === 'testing'" (click)="testLlmConnection()">
+          {{ llmStatus === 'testing' ? 'Testing…' : '⚡ Test Connection' }}
+        </button>
+        <button class="btn btn-primary" [disabled]="!llmConfig.apiKey || !llmConfig.baseUrl" (click)="saveLlmConfig()">
+          ✅ Save &amp; Activate
+        </button>
+      </div>
+    </div>
+  }
+
+</div>
+
