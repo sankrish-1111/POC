@@ -6,7 +6,7 @@
     "enabled": true
   },
   "assets": {
-    "directory": "dist/"
+    "directory": "dist/ag-grid-ai/browser"
   },
   "compatibility_flags": [
     "nodejs_compat"
