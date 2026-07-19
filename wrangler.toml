@@ -1,5 +1,0 @@
-name = "ag-grid-ai"
-compatibility_date = "2025-01-01"
-
-[assets]
-directory = "./dist/ag-grid-ai/browser"
