@@ -35,7 +35,7 @@ export interface LlmFilter {
 export const LLM_PRESETS: Record<string, { baseUrl: string; model: string; note: string }> = {
   groq:   { baseUrl: 'https://api.groq.com/openai/v1',  model: 'llama-3.1-8b-instant', note: 'Recommended — free, fast & browser-friendly (no CORS issues). Key: console.groq.com' },
   openai: { baseUrl: 'https://api.openai.com/v1',        model: 'gpt-4o-mini',           note: 'Needs a paid key WITH credits. Use model gpt-4o-mini or gpt-4o. (Browser calls may hit CORS — use a backend proxy in prod.)' },
-  gemini: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-1.5-flash', note: 'Google Gemini via its OpenAI-compatible endpoint. Free tier available. Key: aistudio.google.com' },
+  gemini: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/', model: 'gemini-1.5-flash', note: 'Google Gemini via its OpenAI-compatible endpoint. Free tier available. Key: aistudio.google.com' },
   grok:   { baseUrl: 'https://api.x.ai/v1',              model: 'grok-2',                note: 'xAI Grok — OpenAI-compatible. Paid key from console.x.ai.' },
   ollama: { baseUrl: 'http://localhost:11434/v1',         model: 'llama3.2',              note: 'Local — no key needed. Run "ollama serve" & "ollama pull llama3.2" first.' },
   custom: { baseUrl: '',                                  model: '',                      note: 'Any OpenAI-compatible endpoint (must allow browser/CORS).' },
@@ -153,19 +153,43 @@ export class AiLlmService {
     // First attempt: with JSON mode (except Ollama). If the model rejects
     // response_format, retry once without it.
     const useJsonMode = c.provider !== 'ollama';
-    let content: string;
+    let result: { content: string; finishReason: string };
     try {
-      content = await this.callApi(userMessage, rows, useJsonMode);
+      result = await this.callApi(userMessage, rows, useJsonMode);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       // Retry without json mode if the model/endpoint doesn't support it
       if (useJsonMode && /response_format|json_object|not supported|invalid.*format|400/i.test(msg)) {
-        content = await this.callApi(userMessage, rows, false);
+        result = await this.callApi(userMessage, rows, false);
       } else {
         throw e;
       }
     }
 
+    let { content } = result;
+    const { finishReason } = result;
+
+    // If the response was truncated due to token limit, retry once with a
+    // larger budget before attempting repair.
+    if (finishReason === 'length') {
+      console.warn('LLM response truncated (finish_reason=length). Retrying with higher max_tokens…');
+      try {
+        const retry = await this.callApi(userMessage, rows, useJsonMode, 8192);
+        content = retry.content;
+        // If still truncated after retry, we'll try to repair below
+        if (retry.finishReason !== 'length') {
+          // Success — use the non-truncated result
+        }
+      } catch {
+        // Retry failed — fall through and try to repair the original
+      }
+    }
+
+    return this.parseResponse(content);
+  }
+
+  /** Parse and clean the LLM's raw response text into actions. */
+  private parseResponse(content: string): LlmAction[] {
     // Strip markdown fences some models add despite instructions
     let cleaned = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
 
@@ -176,15 +200,66 @@ export class AiLlmService {
     }
 
     let parsed: Record<string, unknown>;
-    try { parsed = JSON.parse(cleaned); }
-    catch { throw new Error(`LLM returned non-JSON output: "${cleaned.slice(0, 160)}…"`); }
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // Attempt to repair truncated JSON before giving up
+      const repaired = this.tryRepairJson(cleaned);
+      if (repaired) {
+        parsed = repaired;
+      } else {
+        throw new Error(`LLM returned non-JSON output: "${cleaned.slice(0, 160)}…"`);
+      }
+    }
 
     const actions = parsed['actions'];
     return Array.isArray(actions) ? actions as LlmAction[] : [parsed as unknown as LlmAction];
   }
 
+  /**
+   * Try to repair truncated JSON by closing open brackets/braces and
+   * stripping a potentially broken trailing value.
+   * Returns the parsed object on success, or null on failure.
+   */
+  private tryRepairJson(broken: string): Record<string, unknown> | null {
+    // Remove any trailing incomplete string value (cut-off mid-string)
+    let attempt = broken.replace(/,\s*"[^"]*$/, '');        // trailing key without value
+    attempt = attempt.replace(/,\s*"[^"]*"\s*:\s*"[^"]*$/, ''); // key:"partial-value
+    attempt = attempt.replace(/,\s*$/, '');                  // trailing comma
+
+    // Count open brackets/braces and close them
+    const opens = { '{': 0, '[': 0 };
+    let inString = false;
+    let escape = false;
+    for (const ch of attempt) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === '{') opens['{']++;
+      else if (ch === '}') opens['{']--;
+      else if (ch === '[') opens['[']++;
+      else if (ch === ']') opens['[']--;
+    }
+
+    // Close in reverse order — ] first, then }
+    for (let i = 0; i < opens['[']; i++) attempt += ']';
+    for (let i = 0; i < opens['{']; i++) attempt += '}';
+
+    try {
+      return JSON.parse(attempt) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
   /** Single API call. Throws with a human-readable message on any failure. */
-  private async callApi(userMessage: string, rows: SortPairRow[], jsonMode: boolean): Promise<string> {
+  private async callApi(
+    userMessage: string,
+    rows: SortPairRow[],
+    jsonMode: boolean,
+    maxTokensOverride?: number
+  ): Promise<{ content: string; finishReason: string }> {
     const c = this.config!;
 
     const body: Record<string, unknown> = {
@@ -194,7 +269,7 @@ export class AiLlmService {
         { role: 'user',   content: userMessage },
       ],
       temperature: 0.1,
-      max_tokens: 1200,
+      max_tokens: maxTokensOverride ?? 4096,
     };
     if (jsonMode) {
       body['response_format'] = { type: 'json_object' };
@@ -235,7 +310,9 @@ export class AiLlmService {
 
     const data = await resp.json() as Record<string, unknown>;
     const choices = data['choices'] as Array<Record<string, unknown>>;
-    return (choices?.[0]?.['message'] as Record<string, unknown>)?.['content'] as string ?? '{}';
+    const content = (choices?.[0]?.['message'] as Record<string, unknown>)?.['content'] as string ?? '{}';
+    const finishReason = (choices?.[0]?.['finish_reason'] as string) ?? 'stop';
+    return { content, finishReason };
   }
 
 

@@ -251,7 +251,9 @@
           <label class="settings-label">Provider</label>
           <select class="settings-input" [(ngModel)]="llmConfig.provider" (ngModelChange)="onProviderChange()">
             @for (p of llmProviders; track p) {
-              <option [value]="p">{{ p === 'groq' ? 'Groq (free)' : p === 'openai' ? 'OpenAI' : p === 'ollama' ? 'Ollama (local)' : 'Custom' }}</option>
+              <option [value]="p">
+                {{ p === 'groq' ? 'Groq (free)' : p === 'openai' ? 'OpenAI' : p === 'gemini' ? 'Google Gemini' : p === 'grok' ? 'xAI Grok' : p === 'ollama' ? 'Ollama (local)' : 'Custom' }}
+              </option>
             }
           </select>
           <small class="settings-hint">{{ llmPresets[llmConfig.provider]?.note }}</small>
