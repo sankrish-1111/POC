@@ -2,6 +2,8 @@
 
 This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 21.2.12.
 
+> 📖 **Full project documentation** — architecture, workflow diagrams, NLU vs LLM, and sample prompts — is in [DOCUMENTATION.md](DOCUMENTATION.md).
+
 ## Development server
 
 To start a local development server, run:

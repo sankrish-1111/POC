@@ -1,5 +1,4 @@
 import { Injectable } from '@angular/core';
-import { SortPairRow } from './data.service';
 import { GRID_SCHEMA } from './grid-schema';
 
 export interface LlmConfig {
@@ -43,12 +42,10 @@ export const LLM_PRESETS: Record<string, { baseUrl: string; model: string; note:
 
 const STORAGE_KEY = 'ag-grid-ai-llm-cfg';
 
-// ─── System prompt — includes ACTUAL row data so LLM can do real analysis ─────
-function buildSystemPrompt(rows: SortPairRow[]): string {
-  // Compact JSON — one row per line to save tokens
-  const dataJson = rows.map(r => JSON.stringify(r)).join('\n');
-
-  // Column schema & groups are generated from the shared GRID_SCHEMA.
+// ─── System prompt — SCHEMA ONLY (no data). The LLM translates intent into
+//     actions; the app executes them on the REAL data. Keeps the payload tiny,
+//     scales to any dataset size, and never sends rows to the provider. ────────
+function buildSystemPrompt(): string {
   const kindLabel = (k: string) => k === 'number' ? 'numeric' : (k === 'date' ? 'text, date MM/DD/YYYY' : 'text');
   const schemaLines = GRID_SCHEMA.fields
     .map(f => `  ${f.id.padEnd(15)} : ${f.label} (${kindLabel(f.kind)})`)
@@ -57,11 +54,10 @@ function buildSystemPrompt(rows: SortPairRow[]): string {
     .map(g => `  "${g.header}"${' '.repeat(Math.max(1, 20 - g.header.length))}→ [${g.fields.join(', ')}]`)
     .join('\n');
 
-  return `You are an AI data analyst AND AG Grid table controller.
-You have direct access to ALL ${rows.length} rows of the actual dataset shown below.
-
-━━━ LIVE DATA (${rows.length} rows) ━━━
-${dataJson}
+  return `You are a natural-language → AG Grid COMMAND TRANSLATOR.
+You do NOT have the dataset and you never see the rows. Your ONLY job is to convert the
+user's request into precise JSON actions. The application executes them on the real data,
+so every count, value and analytic is computed by the app — never by you.
 
 ━━━ COLUMN SCHEMA ━━━
 ${schemaLines}
@@ -71,8 +67,13 @@ ${groupLines}
 
 ━━━ RESPOND ONLY WITH: {"actions":[...]} ━━━
 
-▶ ANALYSIS / QUESTIONS (use this when user asks a question or wants insights):
-  {"type":"analysis","text":"Your detailed answer here — include specific numbers, names, percentages from the actual data rows above","gridActions":[...optional grid control actions...],"explanation":"what you did"}
+▶ QUESTIONS / INSIGHTS (counts, averages, "who has the most", distributions):
+  You do NOT know the numbers. Return a "stats" action and the app computes the REAL answer:
+  {"type":"stats","statType":"distribution","explanation":"count rows per user"}
+  statType ∈ count | distribution | average | sum | max | min
+  For "find / which rows …" questions, translate to a "filter" instead (narrow the grid).
+  You MAY add a short "analysis" text that DESCRIBES what will be computed — but it must
+  contain NO specific numbers, names or values (you don't have them).
 
 ▶ GRID CONTROL ACTIONS:
   hide-columns      : {"type":"hide-columns","columns":["submittedUser","targetDateStart"]}
@@ -94,7 +95,6 @@ ${groupLines}
   send-mail         : {"type":"send-mail","email":"user@example.com"}
   auto-size         : {"type":"auto-size"}
   reset             : {"type":"reset"}
-  stats             : {"type":"stats","statType":"distribution"}
   help              : {"type":"help"}
 
 FILTER OPERATORS: contains | notContains | equals | notEqual | startsWith | endsWith | blank | notBlank | greaterThan | lessThan | greaterThanOrEqual | lessThanOrEqual | inRange
@@ -103,15 +103,23 @@ CRITICAL RULES:
 1. "except [X]" / "only show [X]" / "hide all but [X]" → hide-all-except (columns = what to KEEP)
 2. "without pagination" / "show all" / "no paging"      → disable-pagination
 3. Column groups expand to their fields (e.g. "Target Date Range" → targetDateStart + targetDateEnd)
-4. For analysis: read the actual data rows above and give real answers with numbers/names
-5. Combine analysis + gridActions when it makes sense (e.g. show insight AND filter to relevant rows)
-6. Multiple actions: put them all in the "actions" array
-7. OR on the SAME column (e.g. comments contains 'schema' OR 'test') → emit MULTIPLE filter
-   objects with the SAME field, one per value:
+4. NEVER state specific data values, counts, names or percentages — you do not have the data.
+   Emit a "stats" or "filter" action and let the app produce the real numbers.
+5. Multiple actions: put them all in the "actions" array, in execution order.
+6. OR on the SAME column (comments contains 'schema' OR 'test') → MULTIPLE filter objects,
+   same field, contains/equals ops:
    {"type":"filter","filters":[{"field":"comments","op":"contains","value":"schema"},{"field":"comments","op":"contains","value":"test"}]}
-8. AND across DIFFERENT columns → one filter object per column in the same filters array.
-9. Always add "explanation" per action
-10. Return ONLY valid JSON — absolutely nothing outside the JSON`;
+7. AND across DIFFERENT columns → one filter object per column in the same filters array.
+8. AND on the SAME column (a numeric/date RANGE) → MULTIPLE filter objects, same field, COMPARISON
+   ops (greaterThan/lessThan/…). Prefer a single inRange with both bounds:
+   {"field":"number","op":"inRange","from":5,"to":10}.
+9. DATE columns: targetDateStart = range START, targetDateEnd = range END, submittedDate = when submitted.
+   "target date range start" → targetDateStart; "...end" → targetDateEnd. Use inRange with from/to
+   (MM/DD/YYYY), e.g. {"field":"targetDateStart","op":"inRange","from":"06/05/2026","to":"06/30/2026"}.
+10. Each request is INDEPENDENT — the grid resets before your response. Include EVERY filter the
+    user asked for in THIS response; assume no previous filter is applied.
+11. Use EXACT column ids from the schema above. Always add "explanation" per action.
+12. Return ONLY valid JSON — absolutely nothing outside the JSON`;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -146,7 +154,7 @@ export class AiLlmService {
 
   getConfig(): LlmConfig | null { return this.config; }
 
-  async query(userMessage: string, rows: SortPairRow[]): Promise<LlmAction[]> {
+  async query(userMessage: string): Promise<LlmAction[]> {
     if (!this.isConfigured()) throw new Error('LLM not configured');
     const c = this.config!;
 
@@ -155,12 +163,12 @@ export class AiLlmService {
     const useJsonMode = c.provider !== 'ollama';
     let result: { content: string; finishReason: string };
     try {
-      result = await this.callApi(userMessage, rows, useJsonMode);
+      result = await this.callApi(userMessage, useJsonMode);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       // Retry without json mode if the model/endpoint doesn't support it
       if (useJsonMode && /response_format|json_object|not supported|invalid.*format|400/i.test(msg)) {
-        result = await this.callApi(userMessage, rows, false);
+        result = await this.callApi(userMessage, false);
       } else {
         throw e;
       }
@@ -174,7 +182,7 @@ export class AiLlmService {
     if (finishReason === 'length') {
       console.warn('LLM response truncated (finish_reason=length). Retrying with higher max_tokens…');
       try {
-        const retry = await this.callApi(userMessage, rows, useJsonMode, 8192);
+        const retry = await this.callApi(userMessage, useJsonMode, 8192);
         content = retry.content;
         // If still truncated after retry, we'll try to repair below
         if (retry.finishReason !== 'length') {
@@ -256,7 +264,6 @@ export class AiLlmService {
   /** Single API call. Throws with a human-readable message on any failure. */
   private async callApi(
     userMessage: string,
-    rows: SortPairRow[],
     jsonMode: boolean,
     maxTokensOverride?: number
   ): Promise<{ content: string; finishReason: string }> {
@@ -265,7 +272,7 @@ export class AiLlmService {
     const body: Record<string, unknown> = {
       model: c.model,
       messages: [
-        { role: 'system', content: buildSystemPrompt(rows) },
+        { role: 'system', content: buildSystemPrompt() },
         { role: 'user',   content: userMessage },
       ],
       temperature: 0.1,
@@ -316,8 +323,8 @@ export class AiLlmService {
   }
 
 
-  async testConnection(rows: SortPairRow[]): Promise<string> {
-    const actions = await this.query('How many rows are in the dataset? Who are the submitters?', rows);
+  async testConnection(): Promise<string> {
+    const actions = await this.query('How many rows are in the dataset? Who are the submitters?');
     const analysis = actions.find(a => a.type === 'analysis');
     if (analysis?.text) return `✅ Connected — LLM answered: "${analysis.text.slice(0, 100)}..."`;
     const first = actions[0];

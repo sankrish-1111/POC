@@ -292,7 +292,7 @@ export class App implements OnInit {
     this.llmStatus = 'testing';
     this.llmStatusMsg = 'Testing connection...';
     try {
-      const msg = await this.llmSvc.testConnection(this.allRows);
+      const msg = await this.llmSvc.testConnection();
       this.llmStatus = 'connected';
       this.llmStatusMsg = msg;
     } catch (e) {

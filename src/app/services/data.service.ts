@@ -61,6 +61,7 @@ export class DataService {
         field: f.id,
         headerName: f.header,
         filter: agFilter(f.kind),
+        filterParams: { maxNumConditions: 20 },   // allow many conditions on one column (AND/OR)
         sortable: true,
         floatingFilter: true,
       };

@@ -134,12 +134,15 @@ export class AiCommandService {
   // ═══════════════════════════════════════════════════════════════════════════
   async process(input: string): Promise<CommandResult> {
     if (!this.gridApi) return { success: false, message: 'Grid not ready.' };
-
+    // Fresh state on every new prompt — previous filters are NOT carried over.
+    // (Chain multiple actions in ONE prompt if you want them to combine.)
+    this.resetFilterState();
     // ── Try LLM first if configured ──────────────────────────────────────────
     if (this.llm.isConfigured()) {
       try {
-        // Pass the ACTUAL rows so the LLM can read and analyze the data
-        const actions = await this.llm.query(input, this.allRows);
+        // The LLM only sees the SCHEMA (not the data) — it translates intent into
+        // actions, and the app executes them on the real rows for 100% accuracy.
+        const actions = await this.llm.query(input);
         if (actions?.length) {
           return this.executeLlmActions(actions);
         }
@@ -301,13 +304,15 @@ export class AiCommandService {
             model[field] = af;
             descs.push(`${this.lbl(field)} ${f.op} "${f.value ?? ''}"`);
           } else {
-            // Multiple conditions on one field → OR them together
-            model[field] = {
-              filterType: ft,
-              operator: 'OR',
-              conditions: fs.map(f => ({ filterType: ft, type: f.op, filter: f.value })),
-            };
-            descs.push(`${this.lbl(field)} ${fs[0].op} (${fs.map(f => `"${f.value}"`).join(' OR ')})`);
+            // Multiple conditions on ONE field. Comparisons/ranges (>, <, between)
+            // AND together; alternative text matches (contains/equals) OR together.
+            const isCompare = (op: string) => ['greaterThan','greaterThanOrEqual','lessThan','lessThanOrEqual','inRange','notEqual'].includes(op);
+            const useAnd = fs.some(f => isCompare(f.op));
+            const leaves = fs.map(f => f.op === 'inRange'
+              ? { filterType: ft, type: f.op, filter: f.from, filterTo: f.to }
+              : { filterType: ft, type: f.op, filter: f.value });
+            model[field] = { filterType: ft, operator: useAnd ? 'AND' : 'OR', conditions: leaves, condition1: leaves[0], condition2: leaves[1] };
+            descs.push(`${this.lbl(field)} ${fs.map(f => `${f.op} "${f.value ?? (f.from + '–' + f.to)}"`).join(useAnd ? ' AND ' : ' OR ')}`);
           }
         }
         this.dateFilters = dateFilters;
@@ -623,6 +628,9 @@ export class AiCommandService {
     if (!isCount && !isAvg && !isSum && !isMax && !isMin && !isDist) return null;
 
     const rows = this.getVisibleRows();
+    if (!rows.length) {
+      return { success: true, message: `📊 No rows match the current filter — nothing to compute.`, parseInfo: this.pi('stats-count', 0.9, [], 'No data for current filter.'), statResult: { type: 'count', value: 0, rows: 0 } };
+    }
     if (isDist) {
       const dist: Record<string, number> = {};
       rows.forEach(r => { const k = r.submittedUser || '(Unknown)'; dist[k] = (dist[k] || 0) + 1; });
@@ -723,12 +731,15 @@ export class AiCommandService {
     const current = merge ? this.gridApi!.getFilterModel() : null;
     const model: Record<string, unknown> = current ? { ...current } : {};
     const descs: string[] = [];
-    for (const c of gridConds) {
-      const entry = this.buildFilterEntry(c);
-      model[c.field] = model[c.field]
-        ? { filterType: c.filterType, operator: 'AND', condition1: model[c.field], condition2: entry }
-        : entry;
-      descs.push(this.descCond(c));
+    // Group non-date conditions by field so multiple conditions on ONE column combine correctly.
+    const byField: Record<string, CondEx[]> = {};
+    for (const c of gridConds) { (byField[c.field] ||= []).push(c); }
+    for (const [field, conds] of Object.entries(byField)) {
+      const built = this.buildFieldModel(conds);
+      model[field] = model[field]
+        ? { filterType: conds[0].filterType, operator: 'AND', condition1: model[field], condition2: built }
+        : built;
+      conds.forEach(c => descs.push(this.descCond(c)));
     }
     const newDateFilters: DateCond[] = dateConds.map(c => ({ cols: c.dateCols!, op: c.dateOp!, from: c.dateFrom ?? null, to: c.dateTo ?? null }));
     this.dateFilters = merge ? [...this.dateFilters, ...newDateFilters] : newDateFilters;
@@ -822,6 +833,19 @@ export class AiCommandService {
       .map(s => s.trim().replace(/^['"]|['"]$/g,'').replace(/^(?:the|a|an)\s+/i,'').trim())
       .filter(s => s.length > 0);
   }
+  /** Build the AG Grid model for ONE column from all its conditions. Multiple conditions AND together (e.g. >5 and <10). */
+  private buildFieldModel(conds: CondEx[]): Record<string, unknown> {
+    if (conds.length === 1) return this.buildFilterEntry(conds[0]);
+    const ft = conds[0].filterType;
+    const leaf = (c: CondEx): Record<string, unknown> => {
+      if (c.agOp === 'blank' || c.agOp === 'notBlank') return { filterType: ft, type: c.agOp };
+      if (c.agOp === 'inRange') return { filterType: ft, type: c.agOp, filter: c.from, filterTo: c.to };
+      return { filterType: ft, type: c.agOp, filter: c.values && c.values.length ? c.values[0] : c.value };
+    };
+    const leaves = conds.map(leaf);
+    return { filterType: ft, operator: 'AND', conditions: leaves, condition1: leaves[0], condition2: leaves[1] };
+  }
+
   /** Build an AG Grid filter model entry for one condition (handles OR multi-value). */
   private buildFilterEntry(c: CondEx): Record<string, unknown> {
     if (c.values && c.values.length > 1) {
@@ -851,7 +875,13 @@ export class AiCommandService {
     if (!p) return null;
     // 1) exact alias match (range groups are listed before single date fields)
     for (const t of DATE_TARGETS) { if (t.cols.length && t.aliases.includes(p)) return { cols: t.cols }; }
-    // 2) best fuzzy match — longest alias that contains / is contained by the phrase
+    // 2) explicit start/end discriminator inside a target-date phrase narrows to ONE column
+    //    e.g. "target date range start" → targetDateStart, "...range end" → targetDateEnd
+    if (/\btarget\b|\bdate\b|\brange\b/.test(p)) {
+      if (/\b(?:start|begin|beginning|from)\b/.test(p)) return { cols: ['targetDateStart'] };
+      if (/\b(?:end|finish|due|until)\b/.test(p))       return { cols: ['targetDateEnd'] };
+    }
+    // 3) best fuzzy match — longest alias that contains / is contained by the phrase
     let best: { cols: string[]; len: number } | null = null;
     for (const t of DATE_TARGETS) {
       if (!t.cols.length) continue;
@@ -936,7 +966,13 @@ export class AiCommandService {
 
   private extractN(text: string): number | null { const dm=text.match(/\b(\d+)\b/); if(dm) return parseInt(dm[1],10); for(const [w,n] of Object.entries(NUMBER_WORDS)){if(text.includes(w))return n;} return null; }
   private parseNum(token: string): number | null { const n=parseInt(token,10); return isNaN(n)?(NUMBER_WORDS[token.toLowerCase()]??null):n; }
-  private getVisibleRows(): SortPairRow[] { const rows: SortPairRow[]=[]; this.gridApi?.forEachNodeAfterFilter(n=>{if(n.data)rows.push(n.data);}); return rows.length?rows:[...this.allRows]; }
+  private getVisibleRows(): SortPairRow[] { const rows: SortPairRow[]=[]; this.gridApi?.forEachNodeAfterFilter(n=>{if(n.data)rows.push(n.data);}); return rows; }
+
+  /** Clear all active filters (column model + date external filter). Called before every new prompt. */
+  private resetFilterState(): void {
+    this.dateFilters = [];
+    if (this.gridApi) { this.gridApi.setFilterModel(null); this.gridApi.onFilterChanged(); }
+  }
   private descCond(c: CondEx): string { const l=this.lbl(c.field); if(c.isDate) return this.descDateCond(c); if(c.agOp==='blank') return `${l} is empty`; if(c.agOp==='notBlank') return `${l} is not empty`; if(c.agOp==='inRange') return `${l} between ${c.from} and ${c.to}`; if(c.values && c.values.length) return `${l} ${c.agOp} (${c.values.map(v=>`"${v}"`).join(' OR ')})`; return `${l} ${c.agOp} "${c.value}"`; }
   private descDateCond(c: CondEx): string {
     const l = (c.dateCols?.length ?? 0) > 1 ? 'Target date' : this.lbl(c.dateCols![0]);
