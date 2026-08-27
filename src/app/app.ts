@@ -103,6 +103,22 @@ export class App implements OnInit {
 
   constructor(private dataSvc: DataService, private aiSvc: AiCommandService, private llmSvc: AiLlmService) {}
 
+  // ── Engine toggles (AI/LLM and rule-based NLU) ───────────────────────────────
+  get aiEnabled(): boolean { return this.aiSvc.useLlm; }
+  set aiEnabled(v: boolean) { this.aiSvc.useLlm = v; }
+  get nluEnabled(): boolean { return this.aiSvc.useNlu; }
+  set nluEnabled(v: boolean) { this.aiSvc.useNlu = v; }
+
+  toggleAi(): void {
+    this.aiSvc.useLlm = !this.aiSvc.useLlm;
+    this.addAiMessage(`ℹ AI (LLM) ${this.aiSvc.useLlm ? 'enabled' : 'disabled'}.`, true);
+  }
+
+  toggleNlu(): void {
+    this.aiSvc.useNlu = !this.aiSvc.useNlu;
+    this.addAiMessage(`ℹ Rule-based NLU ${this.aiSvc.useNlu ? 'enabled' : 'disabled'}.`, true);
+  }
+
   ngOnInit(): void {
     this.columnDefs = this.dataSvc.getColumnDefs();
     this.allRows = this.dataSvc.getAll();

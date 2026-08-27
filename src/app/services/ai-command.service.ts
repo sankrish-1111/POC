@@ -111,6 +111,10 @@ export class AiCommandService {
   /** Natural-language date filters, applied via AG Grid's external filter (AND-combined with column filters). */
   private dateFilters: DateCond[] = [];
 
+  /** User toggles: whether the AI (LLM) engine and the rule-based NLU engine are allowed to run. */
+  useLlm = true;
+  useNlu = true;
+
   private static readonly MONTHS: Record<string, number> = {
     jan:0,january:0,feb:1,february:1,mar:2,march:2,apr:3,april:3,may:4,jun:5,june:5,
     jul:6,july:6,aug:7,august:7,sep:8,sept:8,september:8,oct:9,october:9,nov:10,november:10,dec:11,december:11,
@@ -144,7 +148,7 @@ export class AiCommandService {
     // (Chain multiple actions in ONE prompt if you want them to combine.)
     this.resetFilterState();
     // ── Try LLM first if configured ──────────────────────────────────────────
-    if (this.llm.isConfigured()) {
+    if (this.useLlm && this.llm.isConfigured()) {
       try {
         // The LLM only sees the SCHEMA (not the data) — it translates intent into
         // actions, and the app executes them on the real rows for 100% accuracy.
@@ -156,6 +160,10 @@ export class AiCommandService {
       } catch (e: unknown) {
         const errMsg = e instanceof Error ? e.message : String(e);
         console.warn('LLM failed, falling back to rule-based NLU:', errMsg);
+        // If NLU is disabled, surface the LLM error without a fallback.
+        if (!this.useNlu) {
+          return { success: false, message: `❌ AI (LLM) error and NLU is turned off.\n   ${errMsg}` };
+        }
         // Surface the error so the user knows WHY the LLM did not run,
         // then still attempt the rule-based engine as a graceful fallback.
         const fallback = this.processRuleBased(input.trim());
@@ -169,7 +177,13 @@ export class AiCommandService {
       }
     }
 
-    // ── Rule-based NLU (no LLM configured) ────────────────────────────────────
+    // ── Rule-based NLU (LLM disabled/unconfigured) ────────────────────────────
+    if (!this.useNlu) {
+      const reason = this.useLlm
+        ? 'AI (LLM) is not configured and NLU is turned off.'
+        : 'Both AI (LLM) and NLU are turned off.';
+      return { success: false, message: `❌ No command engine is active — ${reason}\n   Enable AI or NLU from the toggles above.` };
+    }
     return this.processRuleBased(input.trim());
   }
 

@@ -83,6 +83,20 @@
         <button class="btn-clear-history" (click)="clearAiHistory()" title="Clear history">✕</button>
       </div>
 
+      <!-- Engine toggles: turn AI (LLM) and rule-based NLU on/off -->
+      <div class="ai-engine-toggles">
+        <label class="engine-toggle" [class.on]="aiEnabled" title="Use the connected AI model (LLM). Requires an API key in ⚙ Settings.">
+          <input type="checkbox" [checked]="aiEnabled" (change)="toggleAi()" />
+          <span class="engine-switch"></span>
+          <span class="engine-label">🤖 AI (LLM)</span>
+        </label>
+        <label class="engine-toggle" [class.on]="nluEnabled" title="Use the built-in rule-based natural-language engine.">
+          <input type="checkbox" [checked]="nluEnabled" (change)="toggleNlu()" />
+          <span class="engine-switch"></span>
+          <span class="engine-label">🧠 NLU (rules)</span>
+        </label>
+      </div>
+
       <!-- Live parse indicator -->
       @if (lastParseInfo && !isProcessing) {
         <div class="parse-badge-bar">
