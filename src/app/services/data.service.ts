@@ -57,11 +57,16 @@ export class DataService {
     const agFilter = (kind: ColKind) => (filterTypeOf(kind) === 'number' ? 'agNumberColumnFilter' : 'agTextColumnFilter');
     const toColDef = (id: string): ColDef => {
       const f = GRID_SCHEMA.fields.find(x => x.id === id)!;
+      const isNumber = filterTypeOf(f.kind) === 'number';
       const def: ColDef = {
         field: f.id,
         headerName: f.header,
         filter: agFilter(f.kind),
-        filterParams: { maxNumConditions: 20 },   // allow many conditions on one column (AND/OR)
+        // maxNumConditions: allow many conditions on one column (AND/OR).
+        // inRangeInclusive: make "between X and Y" include the boundary values.
+        filterParams: isNumber
+          ? { maxNumConditions: 20, inRangeInclusive: true }
+          : { maxNumConditions: 20 },
         sortable: true,
         floatingFilter: true,
       };

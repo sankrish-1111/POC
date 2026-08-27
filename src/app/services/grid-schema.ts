@@ -71,5 +71,35 @@ export const DATE_FIELD_IDS: string[] = GRID_SCHEMA.fields.filter(f => f.kind ==
 const FIELD_BY_ID = new Map(GRID_SCHEMA.fields.map(f => [f.id, f]));
 export function fieldById(id: string): FieldSchema | undefined { return FIELD_BY_ID.get(id); }
 
+const GROUP_BY_ID = new Map(GRID_SCHEMA.groups.map(g => [g.id, g]));
+export function groupById(id: string): GroupSchema | undefined { return GROUP_BY_ID.get(id); }
+
+/**
+ * Every natural-language name the NLU should accept for a field — derived so the
+ * engine understands whatever the user SEES in the grid UI. Combines the column
+ * header ("#"), the label ("Number (#)"), the explicit aliases, and every
+ * group-qualified variant (e.g. "sort pairs #", "target date range start",
+ * "submitted by user"). Because it is generated from the schema, adding or
+ * renaming a column/group automatically keeps the NLU in sync with the UI.
+ */
+export function fieldAliases(field: FieldSchema): string[] {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const set = new Set<string>();
+  const colNames = [field.header, field.label, ...field.aliases].map(norm).filter(Boolean);
+  colNames.forEach(n => set.add(n));
+  const group = field.group ? GROUP_BY_ID.get(field.group) : undefined;
+  if (group) {
+    const groupNames = [group.header, ...group.aliases].map(norm).filter(Boolean);
+    for (const gn of groupNames) for (const cn of colNames) set.add(`${gn} ${cn}`);
+  }
+  return [...set];
+}
+
+/** All natural-language names for a group, including its UI header. */
+export function groupAliases(group: GroupSchema): string[] {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  return [...new Set([group.header, ...group.aliases].map(norm).filter(Boolean))];
+}
+
 /** AG Grid / NLU filter type — dates are stored as text, so they filter as text unless handled specially. */
 export function filterTypeOf(kind: ColKind): 'text' | 'number' { return kind === 'number' ? 'number' : 'text'; }

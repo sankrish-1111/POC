@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { GridApi } from 'ag-grid-community';
 import { SortPairRow } from './data.service';
 import { AiLlmService, LlmAction, LlmFilter } from './ai-llm.service';
-import { GRID_SCHEMA, ALL_FIELD_IDS, DATE_FIELD_IDS, filterTypeOf } from './grid-schema';
+import { GRID_SCHEMA, ALL_FIELD_IDS, DATE_FIELD_IDS, filterTypeOf, fieldAliases, groupAliases } from './grid-schema';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 export interface CommandResult {
@@ -30,7 +30,7 @@ export interface StatResult {
 interface ColMeta { id: string; label: string; filterType: 'text' | 'number'; aliases: string[]; }
 
 const COLS: ColMeta[] = GRID_SCHEMA.fields.map(f => ({
-  id: f.id, label: f.label, filterType: filterTypeOf(f.kind), aliases: f.aliases,
+  id: f.id, label: f.label, filterType: filterTypeOf(f.kind), aliases: fieldAliases(f),
 }));
 
 const ALL_COL_IDS = ALL_FIELD_IDS;
@@ -39,7 +39,7 @@ const DATE_COL_IDS = new Set(DATE_FIELD_IDS);
 // Column groups (alias → field ids) for column visibility — derived from schema.
 const COL_GROUPS: Record<string, string[]> = (() => {
   const m: Record<string, string[]> = {};
-  for (const g of GRID_SCHEMA.groups) for (const a of g.aliases) m[a] = g.fields;
+  for (const g of GRID_SCHEMA.groups) for (const a of groupAliases(g)) m[a] = g.fields;
   m['all'] = ALL_FIELD_IDS;
   return m;
 })();
@@ -49,10 +49,10 @@ const COL_GROUPS: Record<string, string[]> = (() => {
 const DATE_TARGETS: { aliases: string[]; cols: string[] }[] = (() => {
   const list: { aliases: string[]; cols: string[] }[] = [];
   for (const g of GRID_SCHEMA.groups) {
-    if (g.isDateRange) list.push({ aliases: g.aliases, cols: g.fields.filter(id => DATE_COL_IDS.has(id)) });
+    if (g.isDateRange) list.push({ aliases: groupAliases(g), cols: g.fields.filter(id => DATE_COL_IDS.has(id)) });
   }
   for (const f of GRID_SCHEMA.fields) {
-    if (f.kind === 'date') list.push({ aliases: f.aliases, cols: [f.id] });
+    if (f.kind === 'date') list.push({ aliases: fieldAliases(f), cols: [f.id] });
   }
   return list;
 })();
@@ -64,15 +64,21 @@ const OPS: { agOp: string; keywords: string[] }[] = [
   { agOp: 'notContains',        keywords: ['not contains','not containing','does not contain','excluding','without','except','not including','not having','not like'] },
   { agOp: 'startsWith',         keywords: ['starts with','starting with','begins with','beginning with','prefixed with'] },
   { agOp: 'endsWith',           keywords: ['ends with','ending with','ends in','ending in','suffixed with'] },
-  { agOp: 'inRange',            keywords: ['between','in range'] },
+  { agOp: 'inRange',            keywords: ['between','within','in range'] },
   { agOp: 'greaterThanOrEqual', keywords: ['at least','>=','minimum','no less than','not less than','greater than or equal to'] },
   { agOp: 'lessThanOrEqual',    keywords: ['at most','<=','maximum','no more than','not more than','up to','less than or equal to'] },
-  { agOp: 'greaterThan',        keywords: ['greater than','more than','>','above','over','exceeds','bigger than','larger than','higher than'] },
-  { agOp: 'lessThan',           keywords: ['less than','fewer than','<','below','under','smaller than','lower than'] },
+  { agOp: 'greaterThan',        keywords: ['greater than','more than','>','above','over','exceeds','bigger than','larger than','higher than','after','later than','newer than'] },
+  { agOp: 'lessThan',           keywords: ['less than','fewer than','<','below','under','smaller than','lower than','before','earlier than','older than','prior to'] },
   { agOp: 'notEqual',           keywords: ['not equals','not equal to','is not','are not',"isn't",'!=','<>','different from','not same as'] },
   { agOp: 'equals',             keywords: ['equals','equal to','is exactly','exactly','==','matches exactly','same as'] },
   { agOp: 'contains',           keywords: ['contains','containing','includes','including','has','like','having','with','matching'] },
 ];
+
+// A shared hint that a phrase contains a filter operator — used both to stop the
+// sort handler from hijacking group-name filters ("Sort Pairs # between 4 and 8")
+// and to let operator-only phrases ("Sort Pairs # > 5") reach the filter engine
+// without an explicit intent verb.
+const FILTER_OP_HINT = /[<>=]|\b(?:between|within|in\s+range|contains?|not\s+contains|excluding|equals?|not\s+equal|greater|less|more\s+than|fewer|above|below|over|under|after|before|earlier|later|at\s+least|at\s+most|starts\s+with|ends\s+with|is\s+(?:empty|blank|not\s+empty|not\s+blank))\b/i;
 
 const NUMBER_WORDS: Record<string, number> = {
   'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,
@@ -434,7 +440,7 @@ export class AiCommandService {
     // 1) Explicit separators
     const rawParts = input.split(/\s*;\s*|\s+then\s+(?:also\s+)?|\s+and\s+then\s+/i);
     // 2) Split on "and/with/,/. <action-verb>" so filter-condition "and"s stay intact
-    const verb = '(?:sort|order|arrange|rank|filter|export|download|save\\s+as|send|mail|email|hide|unhide|reveal|display|select|deselect|clear|reset|refresh|auto\\s*-?size|group|show\\s+all\\s+columns?|show\\s+(?:the\\s+)?(?:last|first|top|bottom))';
+    const verb = '(?:sort|order|arrange|rank|filter|export|download|save\\s+as|send|mail|email|hide|unhide|reveal|display|select|deselect|clear|reset|refresh|auto\\s*-?size|group|keep|newest|oldest|latest|earliest|most\\s+recent|show\\s+all\\s+columns?|show\\s+(?:the\\s+)?(?:last|first|top|bottom))';
     const splitRe = new RegExp(`\\s+(?:and|with)\\s+(?=${verb}\\b)|\\s*,\\s*(?=${verb}\\b)|\\s*\\.\\s+(?=${verb}\\b)`, 'i');
     const out: string[] = [];
     for (const p of rawParts) {
@@ -447,6 +453,7 @@ export class AiCommandService {
   }
 
   private runSingleIntent(input: string, mergeFilters = false): CommandResult {
+    input = this.normalizeShorthand(input);
     const t = input.toLowerCase().trim();
 
     // ── Help ────────────────────────────────────────────────────────────────
@@ -507,6 +514,10 @@ export class AiCommandService {
     const sortR = this.trySort(t);
     if (sortR) return sortR;
 
+    // ── Natural-language sort ("newest first", "alphabetically by person") ───
+    const natSortR = this.tryNaturalSort(t);
+    if (natSortR) return natSortR;
+
     // ── Export / Mail ────────────────────────────────────────────────────────
     const expR = this.tryExport(t, input);
     if (expR) return expR;
@@ -546,37 +557,46 @@ export class AiCommandService {
       return this.ok('show-all-cols', 'All columns visible.', [], 'Show all columns.');
     }
 
+    // A row filter phrased as "show rows/ones/everything with <operator>" is NOT a
+    // column command — defer to the filter engine (column commands never carry a
+    // comparison operator or empty/blank wording).
+    if (FILTER_OP_HINT.test(t) || /\b(?:empty|blank|missing|not\s+empty)\b/i.test(t)) return null;
+
     const isHide = /^hide\b/i.test(t);
     const isShow = /^(?:show|unhide|reveal|display)\b/i.test(t) && !/^show\s+all\s+col/i.test(t);
     if (!isHide && !isShow) return null;
 
     const verb = isHide ? 'hide' : 'show';
 
-    // "except" / "only" / "other than" logic → hide-all-except
-    const hasExcept = /\bexcept\b|\bother\s+than\b|\bapart\s+from\b|\bonly\b/i.test(t);
+    // Keep-list mode = keep the listed columns and hide the rest.
+    // Triggered by "show only X", "hide all except X", "... other than / apart from X".
+    // Note: "only" implies keep-list ONLY for show ("hide only X" just hides X).
+    const exceptRe = /\b(?:except|other\s+than|apart\s+from|all\s+but)\s+(.+)$/i;
+    const exceptMatch = exceptRe.exec(t);
+    const onlyMatch = isShow ? /\bonly\s+(.+)$/i.exec(t) : null;
+    const keepList = !!exceptMatch || !!onlyMatch;
 
-    // Extract column list from text
-    let colPart = t
+    let keepPart = '';
+    if (exceptMatch) keepPart = exceptMatch[1].trim();
+    else if (onlyMatch) keepPart = onlyMatch[1].trim();
+
+    // Plain column list for "hide X" / "show X".
+    const colPart = t
       .replace(/^(hide|show|unhide|reveal|display)\s+/i, '')
       .replace(/\bcolumns?\b/gi, '')
-      .replace(/\b(except|other\s+than|apart\s+from)\b.*/i, '')
-      .replace(/\bonly\s+(sort\s+pairs?|target\s+date|submitted)/i, (_, g) => g)
+      .replace(exceptRe, '')
       .trim();
 
-    // Also try to extract the "except" part for "hide all except X"
-    let exceptPart = '';
-    const exceptMatch = t.match(/\b(?:except|other\s+than|apart\s+from)\s+(.+)$/i);
-    if (exceptMatch) exceptPart = exceptMatch[1].trim();
-
-    const cols = this.parseColList(hasExcept ? exceptPart : colPart);
+    const cols = this.parseColList(keepList ? keepPart : colPart, keepList);
 
     if (!cols.length) {
-      // Could not parse columns — report it
-      return { success: false, message: `❌ Couldn't identify columns in: "${t}". Try: "hide comments", "hide column user", or "hide all except sort pairs".`, parseInfo: this.pi('hide-col', 0.4, [], 'Column names not recognized.') };
+      // Couldn't identify any columns — return null (not an error) so the request
+      // can fall through to the filter engine (e.g. "show only Vignesh's rows").
+      return null;
     }
 
-    if (hasExcept) {
-      // Show only the 'except' columns, hide the rest
+    if (keepList) {
+      // Keep the listed columns visible, hide everything else.
       const toHide = ALL_COL_IDS.filter(c => !cols.includes(c));
       this.gridApi!.setColumnsVisible(ALL_COL_IDS, true);
       this.gridApi!.setColumnsVisible(toHide, false);
@@ -584,33 +604,59 @@ export class AiCommandService {
       return this.ok('hide-col', `Showing only: ${kept}  (${toHide.length} columns hidden)`, [], `Show only ${kept}.`);
     }
 
-    this.gridApi!.setColumnsVisible(cols, verb === 'hide' ? false : true);
+    this.gridApi!.setColumnsVisible(cols, !isHide);
     const affected = cols.map(c => this.lbl(c)).join(', ');
-    return this.ok(verb === 'hide' ? 'hide-col' : 'show-col', `${verb === 'hide' ? 'Hidden' : 'Shown'}: ${affected}`, [], `${verb} ${affected}.`);
+    return this.ok(isHide ? 'hide-col' : 'show-col', `${isHide ? 'Hidden' : 'Shown'}: ${affected}`, [], `${verb} ${affected}.`);
   }
 
-  /** Parse a comma/and/semicolon-separated list of column names or group names */
-  private parseColList(text: string): string[] {
+  /**
+   * Parse a comma/and/semicolon-separated list of column names or group names.
+   * `strict` disables the fuzzy fallback so ambiguous phrases (e.g. "Vignesh's
+   * submissions" in "show only …") fall through to the filter engine instead of
+   * being mistaken for column names.
+   */
+  private parseColList(text: string, strict = false): string[] {
     // Split on commas, semicolons, " and ", " & "
     const parts = text.split(/[,;]|\s+and\s+|\s+&\s+|\s+or\s+/i);
     const out: string[] = [];
     for (const raw of parts) {
       const p = raw.trim().replace(/\bcolumns?\b/gi, '').replace(/\bthe\b/gi, '').trim();
       if (!p) continue;
-      // Try direct column match
-      const colId = this.findCol(p);
-      if (colId) { out.push(colId); continue; }
-      // Try group match
-      const grpCols = this.findGroup(p);
+      // 1) Group match (multi-word groups like "sort pairs") wins first.
+      const grpCols = this.findGroup(p, strict);
       if (grpCols.length) { out.push(...grpCols); continue; }
+      // 2) Exact whole-phrase column match keeps multi-word names intact ("start date").
+      const exact = this.findColExact(p);
+      if (exact) { out.push(exact); continue; }
+      // 3) Space-separated multiple columns without commas ("id number user").
+      const words = p.split(/\s+/);
+      if (words.length > 1) {
+        const found = words.map(w => this.findColExact(w)).filter((x): x is string => !!x);
+        if (found.length === words.length) { out.push(...found); continue; }
+        if (!strict && found.length) { out.push(...found); continue; }
+      }
+      // 4) Fuzzy fallback (best partial alias match) — skipped in strict mode.
+      if (!strict) {
+        const fuzzy = this.findCol(p);
+        if (fuzzy) out.push(fuzzy);
+      }
     }
     return [...new Set(out)];
   }
 
-  private findGroup(text: string): string[] {
+  /** Exact column match by id or alias (no fuzzy). Preserves multi-word column names. */
+  private findColExact(keyword: string): string | null {
+    const kw = keyword.toLowerCase().trim().replace(/^(?:the|a|an)\s+/i, '').trim();
+    if (!kw) return null;
+    for (const col of COLS) { if (col.id === kw || col.aliases.includes(kw)) return col.id; }
+    return null;
+  }
+
+  private findGroup(text: string, strict = false): string[] {
     const t = text.toLowerCase().trim();
     for (const [key, cols] of Object.entries(COL_GROUPS)) {
-      if (t === key || t.includes(key) || key.includes(t)) return cols;
+      // Strict mode requires an exact alias match; loose mode allows substrings.
+      if (t === key || (!strict && (t.includes(key) || key.includes(t)))) return cols;
     }
     return [];
   }
@@ -619,10 +665,13 @@ export class AiCommandService {
   //  OTHER RULE-BASED HANDLERS
   // ═══════════════════════════════════════════════════════════════════════════
   private tryStats(t: string): CommandResult | null {
+    // A sort command ("order by pair count, smallest to biggest") can contain
+    // stat-sounding words like "smallest"/"most" — let the sort handler own it.
+    if (/^(?:please\s+|now\s+)?(?:sort|order|arrange|rank)\b/i.test(t)) return null;
     const isCount = /how many|^count\b|total\s+(rows?|records?)|number\s+of\s+rows/i.test(t);
     const isAvg   = /\baverage\b|\bavg\b|\bmean\b/i.test(t);
     const isSum   = /\bsum\b|\btotal\s+(number|pairs)/i.test(t);
-    const isMax   = /\bmax(?:imum)?\b|\bhighest\b|\blargest\b|\bmost\b/i.test(t);
+    const isMax   = /\bmax(?:imum)?\b|\bhighest\b|\blargest\b|\bmost\b(?!\s+recent)/i.test(t);
     const isMin   = /\bmin(?:imum)?\b|\blowest\b|\bsmallest\b|\bleast\b/i.test(t);
     const isDist  = /distribution|breakdown|group\s*by|per\s+user|by\s+submitter|who\s+submitted/i.test(t);
     if (!isCount && !isAvg && !isSum && !isMax && !isMin && !isDist) return null;
@@ -683,8 +732,15 @@ export class AiCommandService {
   }
 
   private trySort(t: string): CommandResult | null {
-    const m = t.match(/\b(?:sort|order|arrange|rank)\b\s*(?:the\s+(?:data|rows?|table)\s+)?(?:by\s+|on\s+|using\s+)?(.+)$/i);
+    // Anchor the sort verb to the start so phrases like "hide all except sort pairs"
+    // (which merely CONTAIN the word "sort") are not misread as a sort command.
+    const m = t.match(/^(?:please\s+|now\s+)?(?:sort|order|arrange|rank)\b\s*(?:the\s+(?:data|rows?|table)\s+)?(?:by\s+|on\s+|using\s+)?(.+)$/i);
     if (!m) return null;
+    // A real sort is "sort by X" or "sort X [asc|desc]". If the command contains a
+    // filter operator it's actually a FILTER that begins with a group name the user
+    // read in the UI (e.g. "Sort Pairs # between 4 and 8") — defer to the filter engine.
+    const startsWithSortBy = /^(?:please\s+|now\s+)?(?:sort|order|arrange|rank)\s+by\b/i.test(t);
+    if (!startsWithSortBy && FILTER_OP_HINT.test(t)) return null;
     let colKw = m[1].trim();
     // Pull the direction out of the tail, then strip it from the column phrase
     let dir: 'asc'|'desc' = 'asc';
@@ -697,8 +753,70 @@ export class AiCommandService {
     colKw = colKw.replace(/\b(?:column|field|the|in|order|value)\b/gi, '').replace(/\s+/g, ' ').trim();
     const colId = this.findCol(colKw);
     if (!colId) return {success:false,message:`❌ Sort: column "${colKw}" not found. Try: id, number, start, end, date, user, comments.`,parseInfo:this.pi('sort',0.5,[{type:'column',label:'Unknown',value:colKw}],'Column unknown.')};
-    this.gridApi!.applyColumnState({state:[{colId,sort:dir}],defaultState:{sort:null}});
-    return {success:true,message:`✅ Sorted by "${this.lbl(colId)}" ${dir==='asc'?'ascending ↑':'descending ↓'}`,parseInfo:this.pi('sort',0.95,[{type:'column',label:'Column',value:this.lbl(colId)},{type:'direction',label:'Direction',value:dir}],`Sort ${dir}.`)};
+    return this.applySort(colId, dir);
+  }
+
+  /** Apply a single-column sort and report it (shared by the keyword & natural sort handlers). */
+  private applySort(colId: string, dir: 'asc'|'desc'): CommandResult {
+    this.gridApi!.applyColumnState({ state: [{ colId, sort: dir }], defaultState: { sort: null } });
+    return {success:true,message:`✅ Sorted by "${this.lbl(colId)}" ${dir==='asc'?'ascending ↑':'descending ↓'}`,parseInfo:this.pi('sort',0.92,[{type:'column',label:'Column',value:this.lbl(colId)},{type:'direction',label:'Direction',value:dir}],`Sort ${dir}.`)};
+  }
+
+  /** Direction-only sort phrasing with no explicit "sort by" (e.g. "newest first"). */
+  private tryNaturalSort(t: string): CommandResult | null {
+    // "alphabetically [by X]" → sort that column ascending (default: user).
+    if (/\balphabetical/i.test(t)) {
+      const by = /\bby\s+(.+)$/i.exec(t);
+      const colId = (by && this.findCol(by[1].trim())) || 'submittedUser';
+      return this.applySort(colId, 'asc');
+    }
+    // "newest/oldest … first" → sort the submitted date.
+    if (/\bfirst\b/i.test(t)) {
+      if (/\b(?:newest|latest|most\s+recent|recent)\b/i.test(t)) return this.applySort('submittedDate', 'desc');
+      if (/\b(?:oldest|earliest)\b/i.test(t)) return this.applySort('submittedDate', 'asc');
+    }
+    return null;
+  }
+
+  /**
+   * Normalize human shorthand into a canonical NLU command (all map to the user column).
+   * "keep priya and oscar"               → "filter user contains priya or oscar"
+   * "show me only Vignesh's submissions" → "filter user contains vignesh"
+   * "hide anything that isn't Priya's"   → "filter user contains priya"  (double negative)
+   * "just the stuff from Sowmiya or Oscar" → "filter user contains sowmiya or oscar"
+   */
+  private normalizeShorthand(input: string): string {
+    const s = input.trim();
+
+    const keep = /^(?:keep|just\s+keep)\s+(?:only\s+)?(.+)$/i.exec(s);
+    if (keep && !FILTER_OP_HINT.test(keep[1])) {
+      const vals = keep[1].split(/\s*,\s*|\s+and\s+|\s+or\s+/i).map(v => v.trim()).filter(Boolean);
+      if (vals.length && !vals.some(v => this.findColExact(v))) {
+        return `filter user contains ${vals.join(' or ')}`;
+      }
+    }
+
+    // Possessive people filter: "<Name>'s submissions/rows/work/…", incl. negated forms.
+    const poss = /\b([a-z][a-z]+)['\u2019]s\b/i.exec(s);
+    if (poss && (/\b(?:submissions?|rows?|work|stuff|items?|tasks?|records?|data|entries|ones|things?)\b/i.test(s) || /['\u2019]s\s*$/.test(s))) {
+      const name = poss[1].toLowerCase();
+      // Count negation words — an even count ("hide … that isn't …") cancels out to a positive.
+      const negs = (s.match(/\b(?:isn['\u2019]?t|aren['\u2019]?t|doesn['\u2019]?t|not|hide|exclude|remove|without|except|drop|omit)\b/gi) || []).length;
+      const neg = negs % 2 === 1;
+      return `filter user ${neg ? 'not contains' : 'contains'} ${name}`;
+    }
+
+    // "from <Name>[ or/and <Name>…]" people filter (e.g. "just the stuff from Sowmiya or Oscar").
+    const from = /\bfrom\s+([a-z][a-z]+(?:\s*(?:,|or|and)\s*[a-z]+)*)/i.exec(s);
+    if (from && /\b(?:stuff|rows?|submissions?|records?|items?|ones|just|only|show|see|give|filter)\b/i.test(s)) {
+      const names = from[1].split(/\s*(?:,|or|and)\s*/i).map(n => n.trim().toLowerCase()).filter(Boolean);
+      // Skip month words so date phrases ("from May") aren't mistaken for people.
+      if (names.length && !names.some(n => AiCommandService.MONTHS[n] !== undefined)) {
+        return `filter user contains ${names.join(' or ')}`;
+      }
+    }
+
+    return input;
   }
 
   private tryExport(t: string, raw: string): CommandResult | null {
@@ -720,7 +838,10 @@ export class AiCommandService {
   }
 
   private tryAdvancedFilter(t: string, merge = false): CommandResult | null {
-    const hasIntent = /\b(filter|show|find|get|list|display|where|who|which|whose|having|submitted|records?|rows?|entries?|look\s+for|search|give\s+me)\b/i.test(t);
+    // Accept an explicit intent verb OR a bare column+operator phrase, so prompts
+    // worded straight from the UI headers (e.g. "Sort Pairs # > 5") are understood.
+    const hasIntent = FILTER_OP_HINT.test(t)
+      || /\b(filter|show|find|get|list|display|where|who|which|whose|having|submitted|records?|rows?|entries?|look\s+for|search|give\s+me)\b/i.test(t);
     if (!hasIntent) return null;
     const conditions = this.extractConditions(t);
     if (!conditions.length) return null;
@@ -754,7 +875,7 @@ export class AiCommandService {
   private extractConditions(text: string): CondEx[] {
     // Protect the "and" inside "between X and Y" so the range isn't split into two conditions.
     const SENTINEL = '\u0001';
-    const guarded = text.replace(/\bbetween\b.+?\band\b/gi, seg => seg.replace(/\band\b/i, SENTINEL));
+    const guarded = text.replace(/\b(?:between|within|in\s+range)\b.+?\band\b/gi, seg => seg.replace(/\band\b/i, SENTINEL));
     // Split conditions on sentence separators (". " / "; ") AND connective words ("and", "plus"…).
     const parts = guarded
       .split(/\s*[.;]\s+|\s+(?:and|also|additionally|plus|as\s+well\s+as)\s+/i)
@@ -951,9 +1072,9 @@ export class AiCommandService {
       const vals = dc.cols.map(c => this.rowDateMs(row, c)).filter((v): v is number => v !== null);
       if (!vals.length) return false;
       const lo = Math.min(...vals), hi = Math.max(...vals);
-      if (dc.op === 'inRange') { if (!(hi >= dc.from! && lo <= dc.to!)) return false; }          // interval overlap
-      else if (dc.op === 'after') { if (!(hi >= dc.from!)) return false; }
-      else if (dc.op === 'before') { if (!(lo <= dc.to!)) return false; }
+      if (dc.op === 'inRange') { if (!(hi >= dc.from! && lo <= dc.to!)) return false; }          // interval overlap (inclusive)
+      else if (dc.op === 'after') { if (!(hi > dc.from!)) return false; }                          // strictly after
+      else if (dc.op === 'before') { if (!(lo < dc.to!)) return false; }                            // strictly before
       else if (dc.op === 'on') { if (!vals.some(v => v === dc.from)) return false; }
     }
     return true;
@@ -977,8 +1098,8 @@ export class AiCommandService {
   private descDateCond(c: CondEx): string {
     const l = (c.dateCols?.length ?? 0) > 1 ? 'Target date' : this.lbl(c.dateCols![0]);
     if (c.dateOp === 'inRange') return `${l} between ${this.fmtDate(c.dateFrom!)} and ${this.fmtDate(c.dateTo!)}`;
-    if (c.dateOp === 'after')   return `${l} on/after ${this.fmtDate(c.dateFrom!)}`;
-    if (c.dateOp === 'before')  return `${l} on/before ${this.fmtDate(c.dateTo!)}`;
+    if (c.dateOp === 'after')   return `${l} after ${this.fmtDate(c.dateFrom!)}`;
+    if (c.dateOp === 'before')  return `${l} before ${this.fmtDate(c.dateTo!)}`;
     return `${l} on ${this.fmtDate(c.dateFrom!)}`;
   }
   private ok(intent: string, msg: string, ents: EntityItem[], interp = msg): CommandResult { return {success:true,message:`✅ ${msg}`,parseInfo:this.pi(intent,1,ents,interp)}; }
